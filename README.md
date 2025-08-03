@@ -1,4 +1,24 @@
-# WireGuard Connection Monitor
+## Quick Start
+
+1. **Clone and setup:**
+   ```bash
+   git clone https://github.com/isriam/wireguard-monitor.git
+   cd wireguard-monitor
+   sudo bash setup.sh
+   ```
+
+2. **Configure:**
+   ```bash
+   cp .env.example .env
+   nano .env  # Add your API key and email settings
+   ```
+
+3. **Start monitoring:**
+   ```bash
+   sudo systemctl start wireguard-monitor
+   ```
+
+That's it! The monitor will start checking your WireGuard connections and send email alerts when issues are detected.# WireGuard Connection Monitor
 
 A Python script that monitors WireGuard VPN connections via the WireGuard Dashboard API and sends email notifications when connections fail or recover.
 
@@ -19,24 +39,89 @@ A Python script that monitors WireGuard VPN connections via the WireGuard Dashbo
 
 ## Installation
 
+### Automated Setup (Recommended)
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/isriam/wireguard-monitor.git
+   cd wireguard-monitor
+   ```
+
+2. **Run the setup script:**
+   ```bash
+   sudo bash setup.sh
+   ```
+
+   The setup script will:
+   - Create a Python virtual environment
+   - Install all dependencies
+   - Create a systemd service
+   - Set proper file permissions
+   - Optionally start the service
+
+3. **Configure your settings:**
+   ```bash
+   cp .env.example .env
+   nano .env  # Edit with your settings
+   ```
+
+4. **Start the service:**
+   ```bash
+   sudo systemctl start wireguard-monitor
+   ```
+
+### Manual Installation
+
+If you prefer to set up manually:
+
 1. **Clone the repository:**
    ```bash
    git clone https://github.com/yourusername/wireguard-monitor.git
    cd wireguard-monitor
    ```
 
-2. **Install dependencies:**
+2. **Create virtual environment:**
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+3. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Configure environment variables:**
+4. **Configure environment variables:**
    ```bash
    cp .env.example .env
    nano .env  # Edit with your settings
    ```
 
-## Configuration
+## Setup Script Details
+
+The `setup.sh` script automates the entire installation process:
+
+### What it does:
+- ✅ Checks for Python 3 installation
+- ✅ Creates an isolated Python virtual environment
+- ✅ Installs all required dependencies
+- ✅ Creates a systemd service file with proper security settings
+- ✅ Sets correct file permissions
+- ✅ Enables the service to start on boot
+- ✅ Optionally starts the service immediately
+
+### Security Features:
+- Runs the service as a non-root user
+- Implements systemd security restrictions
+- Sets proper file permissions (600 for .env)
+- Uses virtual environment isolation
+
+### Requirements:
+- Must be run with `sudo` (for systemd service creation)
+- Python 3 with venv support
+- systemd-based Linux distribution
+
+If the setup script doesn't work for your system, you can follow the manual installation steps instead.
 
 ### Required Environment Variables
 
@@ -83,12 +168,47 @@ Update `SMTP_SERVER` and `SMTP_PORT` for your provider:
 
 ## Usage
 
-### Manual Execution
+### Manual Execution (Virtual Environment)
+```bash
+source venv/bin/activate
+python3 wireguard_monitor.py
+```
+
+### Manual Execution (System Python)
 ```bash
 python3 wireguard_monitor.py
 ```
 
-### Run as a Service (systemd)
+### Service Management
+
+If you used the setup script, the monitor is installed as a systemd service:
+
+```bash
+# Start the service
+sudo systemctl start wireguard-monitor
+
+# Stop the service
+sudo systemctl stop wireguard-monitor
+
+# Restart the service
+sudo systemctl restart wireguard-monitor
+
+# Check service status
+sudo systemctl status wireguard-monitor
+
+# View live logs
+sudo journalctl -u wireguard-monitor -f
+
+# Enable auto-start on boot (done automatically by setup script)
+sudo systemctl enable wireguard-monitor
+
+# Disable auto-start on boot
+sudo systemctl disable wireguard-monitor
+```
+
+### Run as a Service (systemd) - Manual Setup
+
+If you didn't use the automated setup script, you can manually create the service:
 
 1. **Create service file:**
    ```bash
@@ -105,7 +225,7 @@ python3 wireguard_monitor.py
    Type=simple
    User=your_username
    WorkingDirectory=/path/to/wireguard-monitor
-   ExecStart=/usr/bin/python3 /path/to/wireguard-monitor/wireguard_monitor.py
+   ExecStart=/path/to/wireguard-monitor/venv/bin/python /path/to/wireguard-monitor/wireguard_monitor.py
    Restart=always
    RestartSec=10
 
@@ -118,11 +238,6 @@ python3 wireguard_monitor.py
    sudo systemctl daemon-reload
    sudo systemctl enable wireguard-monitor
    sudo systemctl start wireguard-monitor
-   ```
-
-4. **Check service status:**
-   ```bash
-   sudo systemctl status wireguard-monitor
    ```
 
 ### Run with Screen (Alternative)
