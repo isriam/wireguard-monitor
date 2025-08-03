@@ -179,6 +179,13 @@ python3 wireguard_monitor.py
 ### Manual Execution (System Python)
 ```bash
 python3 wireguard_monitor.py
+
+Debug Examples:
+  python3 wireguard_monitor.py                    # Normal operation
+  python3 wireguard_monitor.py -v                 # Verbose output
+  python3 wireguard_monitor.py -d                 # Debug mode with detailed logging
+  python3 wireguard_monitor.py --test-email       # Test email configuration
+  python3 wireguard_monitor.py --check-once       # Single status check (no loop)
 ```
 
 ### Service Management

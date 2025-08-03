@@ -148,9 +148,72 @@ CONFIG = load_config()
 # Initialize logger (will be reconfigured in main())
 logger = logging.getLogger(__name__)
 
+class EmailNotifier:
+    """Handles email notifications for WireGuard monitoring."""
+    
+    def __init__(self, email_config: Dict):
+        """Initialize email notifier with configuration."""
+        self.config = email_config
+        self.logger = logging.getLogger(__name__)
+    
+    def send_notification(self, subject: str, body: str):
+        """Send email notification."""
+        try:
+            self.logger.debug(f"Preparing email: {subject}")
+            self.logger.debug(f"SMTP server: {self.config['smtp_server']}:{self.config['smtp_port']}")
+            self.logger.debug(f"From: {self.config['from_email']}")
+            self.logger.debug(f"To: {self.config['to_emails']}")
+            
+            msg = MIMEMultipart()
+            msg['From'] = self.config['from_email']
+            msg['To'] = ', '.join(self.config['to_emails'])
+            msg['Subject'] = subject
+            
+            msg.attach(MIMEText(body, 'plain'))
+            
+            self.logger.debug("Connecting to SMTP server...")
+            server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'])
+            
+            self.logger.debug("Starting TLS...")
+            server.starttls()
+            
+            self.logger.debug("Authenticating...")
+            server.login(self.config['smtp_username'], self.config['smtp_password'])
+            
+            self.logger.debug("Sending email...")
+            for to_email in self.config['to_emails']:
+                server.sendmail(self.config['from_email'], to_email, msg.as_string())
+            
+            server.quit()
+            self.logger.info(f"Email notification sent: {subject}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to send email notification: {e}")
+            self.logger.debug(f"Email error details: {type(e).__name__}: {str(e)}")
+    
+    def send_test_email(self, config_name: str, api_url: str, check_interval: int):
+        """Send a test email to verify configuration."""
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        subject = "WireGuard Monitor Test Email"
+        body = f"""
+This is a test email from WireGuard Monitor.
+
+Configuration Test Results:
+- Timestamp: {timestamp}
+- Monitoring config: {config_name}
+- API URL: {api_url}
+- Check interval: {check_interval} seconds
+
+If you receive this email, your email configuration is working correctly!
+"""
+        
+        self.logger.info("Sending test email...")
+        self.send_notification(subject, body)
+
 class WireGuardMonitor:
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, email_notifier: EmailNotifier):
         self.config = config
+        self.email_notifier = email_notifier
         self.last_status = {}  # Track last known status to avoid spam
         self.consecutive_failures = 0
         
@@ -316,59 +379,74 @@ class WireGuardMonitor:
         logger.debug(f"Connection analysis result: {result}")
         return result
     
-    def send_email_notification(self, subject: str, body: str):
-        """Send email notification."""
-        try:
-            logger.debug(f"Preparing email: {subject}")
-            logger.debug(f"SMTP server: {self.config['smtp_server']}:{self.config['smtp_port']}")
-            logger.debug(f"From: {self.config['from_email']}")
-            logger.debug(f"To: {self.config['to_emails']}")
-            
-            msg = MIMEMultipart()
-            msg['From'] = self.config['from_email']
-            msg['To'] = ', '.join(self.config['to_emails'])
-            msg['Subject'] = subject
-            
-            msg.attach(MIMEText(body, 'plain'))
-            
-            logger.debug("Connecting to SMTP server...")
-            server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'])
-            
-            logger.debug("Starting TLS...")
-            server.starttls()
-            
-            logger.debug("Authenticating...")
-            server.login(self.config['smtp_username'], self.config['smtp_password'])
-            
-            logger.debug("Sending email...")
-            for to_email in self.config['to_emails']:
-                server.sendmail(self.config['from_email'], to_email, msg.as_string())
-            
-            server.quit()
-            logger.info(f"Email notification sent: {subject}")
-            
-        except Exception as e:
-            logger.error(f"Failed to send email notification: {e}")
-            logger.debug(f"Email error details: {type(e).__name__}: {str(e)}")
-    
-    def test_email(self):
-        """Send a test email to verify configuration."""
+    def check_status_changes(self, current_status: Dict):
+        """Check for status changes and send notifications."""
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        subject = "WireGuard Monitor Test Email"
-        body = f"""
-This is a test email from WireGuard Monitor.
-
-Configuration Test Results:
-- Timestamp: {timestamp}
-- Monitoring config: {self.config['config_name']}
-- API URL: {self.config['api_url']}
-- Check interval: {self.config['check_interval']} seconds
-
-If you receive this email, your email configuration is working correctly!
-"""
         
-        logger.info("Sending test email...")
-        self.send_email_notification(subject, body)
+        # Check interface status
+        if not current_status.get('interface', False):
+            if self.last_status.get('interface', True):  # Was up, now down
+                subject = f"WireGuard Interface Down - {self.config['config_name']}"
+                body = f"""
+WireGuard interface {self.config['config_name']} is DOWN.
+
+Time: {timestamp}
+Status: Interface not running
+
+Please check the WireGuard service immediately.
+"""
+                self.email_notifier.send_notification(subject, body)
+        else:
+            # Interface is up, check peers
+            peers = current_status.get('peers', {})
+            last_peers = self.last_status.get('peers', {})
+            
+            disconnected_peers = []
+            reconnected_peers = []
+            
+            for peer_name, is_connected in peers.items():
+                was_connected = last_peers.get(peer_name, True)
+                
+                if not is_connected and was_connected:
+                    disconnected_peers.append(peer_name)
+                elif is_connected and not was_connected:
+                    reconnected_peers.append(peer_name)
+            
+            # Send notifications for disconnections
+            if disconnected_peers:
+                subject = f"WireGuard Peer(s) Disconnected - {self.config['config_name']}"
+                body = f"""
+WireGuard peer(s) have disconnected from {self.config['config_name']}.
+
+Time: {timestamp}
+Disconnected peers: {', '.join(disconnected_peers)}
+
+Current peer status:
+"""
+                for peer_name, is_connected in peers.items():
+                    status = "Connected" if is_connected else "Disconnected"
+                    body += f"  - {peer_name}: {status}\n"
+                
+                self.email_notifier.send_notification(subject, body)
+            
+            # Send notifications for reconnections
+            if reconnected_peers:
+                subject = f"WireGuard Peer(s) Reconnected - {self.config['config_name']}"
+                body = f"""
+WireGuard peer(s) have reconnected to {self.config['config_name']}.
+
+Time: {timestamp}
+Reconnected peers: {', '.join(reconnected_peers)}
+
+Current peer status:
+"""
+                for peer_name, is_connected in peers.items():
+                    status = "Connected" if is_connected else "Disconnected"
+                    body += f"  - {peer_name}: {status}\n"
+                
+                self.email_notifier.send_notification(subject, body)
+        
+        self.last_status = current_status.copy()
     
     def test_api_connectivity(self):
         """Test API connectivity and display results."""
@@ -423,75 +501,6 @@ If you receive this email, your email configuration is working correctly!
         
         return True
     
-    def check_status_changes(self, current_status: Dict):
-        """Check for status changes and send notifications."""
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Check interface status
-        if not current_status.get('interface', False):
-            if self.last_status.get('interface', True):  # Was up, now down
-                subject = f"WireGuard Interface Down - {self.config['config_name']}"
-                body = f"""
-WireGuard interface {self.config['config_name']} is DOWN.
-
-Time: {timestamp}
-Status: Interface not running
-
-Please check the WireGuard service immediately.
-"""
-                self.send_email_notification(subject, body)
-        else:
-            # Interface is up, check peers
-            peers = current_status.get('peers', {})
-            last_peers = self.last_status.get('peers', {})
-            
-            disconnected_peers = []
-            reconnected_peers = []
-            
-            for peer_name, is_connected in peers.items():
-                was_connected = last_peers.get(peer_name, True)
-                
-                if not is_connected and was_connected:
-                    disconnected_peers.append(peer_name)
-                elif is_connected and not was_connected:
-                    reconnected_peers.append(peer_name)
-            
-            # Send notifications for disconnections
-            if disconnected_peers:
-                subject = f"WireGuard Peer(s) Disconnected - {self.config['config_name']}"
-                body = f"""
-WireGuard peer(s) have disconnected from {self.config['config_name']}.
-
-Time: {timestamp}
-Disconnected peers: {', '.join(disconnected_peers)}
-
-Current peer status:
-"""
-                for peer_name, is_connected in peers.items():
-                    status = "Connected" if is_connected else "Disconnected"
-                    body += f"  - {peer_name}: {status}\n"
-                
-                self.send_email_notification(subject, body)
-            
-            # Send notifications for reconnections
-            if reconnected_peers:
-                subject = f"WireGuard Peer(s) Reconnected - {self.config['config_name']}"
-                body = f"""
-WireGuard peer(s) have reconnected to {self.config['config_name']}.
-
-Time: {timestamp}
-Reconnected peers: {', '.join(reconnected_peers)}
-
-Current peer status:
-"""
-                for peer_name, is_connected in peers.items():
-                    status = "Connected" if is_connected else "Disconnected"
-                    body += f"  - {peer_name}: {status}\n"
-                
-                self.send_email_notification(subject, body)
-        
-        self.last_status = current_status.copy()
-    
     def run_monitor(self, check_once=False):
         """Main monitoring loop."""
         logger.info("Starting WireGuard connection monitor...")
@@ -531,7 +540,7 @@ Please check:
 
 Monitoring will continue automatically.
 """
-                        self.send_email_notification(subject, body)
+                        self.email_notifier.send_notification(subject, body)
                         self.consecutive_failures = 0  # Reset to avoid spam
                 else:
                     self.consecutive_failures = 0
@@ -621,12 +630,28 @@ def main():
     elif args.verbose:
         logger.info("Verbose mode enabled")
     
-    monitor = WireGuardMonitor(CONFIG)
+    # Create email notifier instance
+    email_config = {
+        'smtp_server': CONFIG['smtp_server'],
+        'smtp_port': CONFIG['smtp_port'],
+        'smtp_username': CONFIG['smtp_username'],
+        'smtp_password': CONFIG['smtp_password'],
+        'from_email': CONFIG['from_email'],
+        'to_emails': CONFIG['to_emails']
+    }
+    email_notifier = EmailNotifier(email_config)
+    
+    # Create monitor with email notifier
+    monitor = WireGuardMonitor(CONFIG, email_notifier)
     
     try:
         if args.test_email:
             logger.info("Testing email configuration...")
-            monitor.test_email()
+            email_notifier.send_test_email(
+                CONFIG['config_name'],
+                CONFIG['api_url'],
+                CONFIG['check_interval']
+            )
             
         elif args.config_test:
             logger.info("Testing configuration and API connectivity...")
