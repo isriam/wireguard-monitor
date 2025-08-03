@@ -358,22 +358,35 @@ class WireGuardMonitor:
                 logger.debug(f"Peer '{peer_name}': No handshake data")
                 is_connected = False
             
-            # Also check the status field as fallback/confirmation
+            # Improved status field logic - prioritize handshake timing for mobile devices
             if peer_status_field in ['running', 'connected', 'active']:
+                # If status shows running, peer is definitely connected
                 if not is_connected:
                     logger.debug(f"Peer '{peer_name}': Status field '{peer_status_field}' overrides handshake analysis")
                 is_connected = True
             elif peer_status_field in ['stopped', 'disconnected', 'inactive']:
-                if is_connected:
-                    logger.debug(f"Peer '{peer_name}': Status field '{peer_status_field}' overrides handshake analysis")
-                is_connected = False
+                # Only trust 'stopped' status if handshake is actually stale
+                if latest_handshake and latest_handshake != 'No Handshake':
+                    if time_since_handshake > self.config['handshake_timeout']:
+                        # Both status stopped AND handshake stale = truly disconnected
+                        if is_connected:
+                            logger.debug(f"Peer '{peer_name}': Status '{peer_status_field}' + stale handshake confirms disconnection")
+                        is_connected = False
+                    else:
+                        # Status stopped but handshake recent = mobile device sleeping, still connected
+                        if not is_connected:
+                            logger.debug(f"Peer '{peer_name}': Recent handshake overrides status '{peer_status_field}' (mobile device behavior)")
+                        is_connected = True
+                else:
+                    # No handshake data and status stopped = disconnected
+                    is_connected = False
             
             peer_status[peer_name] = is_connected
             
             if not is_connected:
                 logger.warning(f"Monitored peer '{peer_name}' is disconnected (handshake: {latest_handshake}, status: {peer_status_field})")
             else:
-                logger.info(f"Monitored peer '{peer_name}' is connected, (handshake: {latest_handshake}, status: {peer_status_field})")
+                logger.info(f"Monitored peer '{peer_name}' is connected")
         
         result = {'interface': True, 'peers': peer_status}
         logger.debug(f"Connection analysis result: {result}")
@@ -506,7 +519,6 @@ Current peer status:
         logger.info("Starting WireGuard connection monitor...")
         logger.info(f"Monitoring configuration: {self.config['config_name']}")
         logger.info(f"Check interval: {self.config['check_interval']} seconds")
-        logger.info(f"Handshake timeout: {self.config['handshake_timeout']} seconds")
         
         if check_once:
             logger.info("Single check mode enabled")
@@ -651,8 +663,7 @@ def main():
             email_notifier.send_test_email(
                 CONFIG['config_name'],
                 CONFIG['api_url'],
-                CONFIG['check_interval'],
-                CONFIG['handshake_timeout']
+                CONFIG['check_interval']
             )
             
         elif args.config_test:
