@@ -373,7 +373,7 @@ class WireGuardMonitor:
             if not is_connected:
                 logger.warning(f"Monitored peer '{peer_name}' is disconnected (handshake: {latest_handshake}, status: {peer_status_field})")
             else:
-                logger.info(f"Monitored peer '{peer_name}' is connected")
+                logger.info(f"Monitored peer '{peer_name}' is connected, (handshake: {latest_handshake}, status: {peer_status_field})")
         
         result = {'interface': True, 'peers': peer_status}
         logger.debug(f"Connection analysis result: {result}")
