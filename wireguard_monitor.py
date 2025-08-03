@@ -114,6 +114,10 @@ def load_config() -> Dict:
     to_emails_str = os.getenv('TO_EMAILS', 'admin@example.com')
     to_emails = [email.strip() for email in to_emails_str.split(',')]
     
+    # Parse monitored peers (comma-separated)
+    monitored_peers_str = os.getenv('MONITORED_PEERS', '')
+    monitored_peers = [peer.strip() for peer in monitored_peers_str.split(',') if peer.strip()]
+    
     return {
         # WireGuard API settings
         'api_url': os.getenv('WG_API_URL', 'http://localhost:10086/api'),
@@ -134,6 +138,8 @@ def load_config() -> Dict:
         'max_retries': int(os.getenv('MAX_RETRIES', '3')),
         'retry_delay': int(os.getenv('RETRY_DELAY', '30')),
         'handshake_timeout': int(os.getenv('HANDSHAKE_TIMEOUT', '300')),
+        'monitored_peers': monitored_peers,
+        'monitor_all_peers': os.getenv('MONITOR_ALL_PEERS', 'false').lower() == 'true',
     }
 
 # Load configuration
@@ -203,59 +209,108 @@ class WireGuardMonitor:
             return {}
         
         config_data = data['data']
-        logger.debug(f"Configuration data: {json.dumps(config_data, indent=2)}")
+        logger.debug(f"Configuration data keys: {list(config_data.keys())}")
         
-        peer_status = {}
-        
-        # Check if the interface is up
-        interface_status = config_data.get('status', 'down').lower() == 'up'
-        logger.debug(f"Interface status: {interface_status} (raw: {config_data.get('status')})")
+        # Check if the interface is up (correct field name from API)
+        interface_info = config_data.get('configurationInfo', {})
+        interface_status = interface_info.get('Status', False)
+        logger.debug(f"Interface status: {interface_status} (raw: {interface_info.get('Status')})")
         
         if not interface_status:
             logger.warning(f"WireGuard interface {self.config['config_name']} is down")
             return {'interface': False}
         
-        # Check peers
-        peers = config_data.get('peers', [])
-        logger.debug(f"Found {len(peers)} peers")
+        # Check peers (correct field name from API)
+        peers = config_data.get('configurationPeers', [])
+        logger.debug(f"Found {len(peers)} total peers")
         
         if not peers:
             logger.warning("No peers found in configuration")
-            return {'interface': True, 'peers': False}
+            return {'interface': True, 'peers': {}}
+        
+        # Determine which peers to monitor
+        if self.config['monitored_peers']:
+            peers_to_monitor = self.config['monitored_peers']
+            logger.debug(f"Monitoring specific peers: {peers_to_monitor}")
+        elif self.config['monitor_all_peers']:
+            peers_to_monitor = [peer.get('name', f"peer-{i}") for i, peer in enumerate(peers)]
+            logger.debug(f"Monitoring all peers: {peers_to_monitor}")
+        else:
+            logger.warning("No peers configured for monitoring. Set MONITORED_PEERS or MONITOR_ALL_PEERS=true")
+            return {'interface': True, 'peers': {}}
         
         current_time = datetime.now()
         logger.debug(f"Current time: {current_time}")
         
+        peer_status = {}
+        
         for i, peer in enumerate(peers):
-            peer_name = peer.get('name', peer.get('id', f'peer-{i}'))
+            peer_name = peer.get('name', f'peer-{i}')
+            
+            # Only monitor peers in our watch list
+            if peer_name not in peers_to_monitor:
+                logger.debug(f"Skipping peer '{peer_name}' (not in monitor list)")
+                continue
+            
             latest_handshake = peer.get('latest_handshake')
+            peer_status_field = peer.get('status', 'unknown')
             
-            logger.debug(f"Analyzing peer '{peer_name}': handshake={latest_handshake}")
+            logger.debug(f"Analyzing peer '{peer_name}': handshake='{latest_handshake}', status='{peer_status_field}'")
             
-            if latest_handshake and latest_handshake != 'N/A':
+            # Check peer status - this API uses different logic than expected
+            is_connected = False
+            
+            if latest_handshake and latest_handshake != 'No Handshake':
                 try:
-                    # Parse handshake time (adjust format as needed)
-                    handshake_time = datetime.fromisoformat(latest_handshake.replace('Z', '+00:00'))
-                    time_since_handshake = (current_time - handshake_time).total_seconds()
-                    
-                    logger.debug(f"Peer '{peer_name}': handshake time={handshake_time}, seconds ago={time_since_handshake:.1f}")
-                    
-                    # Consider connection alive if handshake within configured timeout
-                    is_connected = time_since_handshake < self.config['handshake_timeout']
-                    peer_status[peer_name] = is_connected
-                    
-                    if not is_connected:
-                        logger.warning(f"Peer {peer_name} last handshake: {time_since_handshake:.0f}s ago")
+                    # Handle different handshake formats
+                    if ':' in latest_handshake and latest_handshake.count(':') >= 2:
+                        # Format: "0:00:26" (hours:minutes:seconds ago)
+                        time_parts = latest_handshake.split(':')
+                        if len(time_parts) == 3:
+                            hours = int(time_parts[0])
+                            minutes = int(time_parts[1])
+                            seconds = int(time_parts[2])
+                            time_since_handshake = hours * 3600 + minutes * 60 + seconds
+                            
+                            is_connected = time_since_handshake < self.config['handshake_timeout']
+                            logger.debug(f"Peer '{peer_name}': handshake {time_since_handshake}s ago -> {'connected' if is_connected else 'disconnected'}")
+                        else:
+                            logger.debug(f"Peer '{peer_name}': Unexpected handshake format: '{latest_handshake}'")
+                            is_connected = False
+                    elif latest_handshake.replace('Z', '').replace('T', ' ').replace('-', '').replace(':', '').isdigit():
+                        # ISO format: "2025-01-15T14:25:00Z"
+                        handshake_time = datetime.fromisoformat(latest_handshake.replace('Z', '+00:00'))
+                        time_since_handshake = (current_time - handshake_time).total_seconds()
+                        is_connected = time_since_handshake < self.config['handshake_timeout']
+                        logger.debug(f"Peer '{peer_name}': handshake {time_since_handshake:.1f}s ago -> {'connected' if is_connected else 'disconnected'}")
                     else:
-                        logger.debug(f"Peer {peer_name} is connected (handshake {time_since_handshake:.0f}s ago)")
+                        # Handle other handshake formats
+                        logger.debug(f"Peer '{peer_name}': Non-standard handshake format: '{latest_handshake}'")
+                        is_connected = False
                         
                 except (ValueError, TypeError) as e:
-                    logger.error(f"Failed to parse handshake time for peer {peer_name}: {e}")
-                    logger.debug(f"Raw handshake value: '{latest_handshake}'")
-                    peer_status[peer_name] = False
+                    logger.debug(f"Failed to parse handshake time for peer {peer_name}: {e}")
+                    is_connected = False
             else:
-                logger.warning(f"Peer {peer_name} has no handshake data")
-                peer_status[peer_name] = False
+                logger.debug(f"Peer '{peer_name}': No handshake data")
+                is_connected = False
+            
+            # Also check the status field as fallback/confirmation
+            if peer_status_field in ['running', 'connected', 'active']:
+                if not is_connected:
+                    logger.debug(f"Peer '{peer_name}': Status field '{peer_status_field}' overrides handshake analysis")
+                is_connected = True
+            elif peer_status_field in ['stopped', 'disconnected', 'inactive']:
+                if is_connected:
+                    logger.debug(f"Peer '{peer_name}': Status field '{peer_status_field}' overrides handshake analysis")
+                is_connected = False
+            
+            peer_status[peer_name] = is_connected
+            
+            if not is_connected:
+                logger.warning(f"Monitored peer '{peer_name}' is disconnected (handshake: {latest_handshake}, status: {peer_status_field})")
+            else:
+                logger.info(f"Monitored peer '{peer_name}' is connected")
         
         result = {'interface': True, 'peers': peer_status}
         logger.debug(f"Connection analysis result: {result}")
@@ -325,19 +380,44 @@ If you receive this email, your email configuration is working correctly!
             return False
         
         logger.info("API connectivity test successful")
+        
+        # Show interface info
+        if 'data' in data and 'configurationInfo' in data['data']:
+            config_info = data['data']['configurationInfo']
+            logger.info(f"Interface '{config_info.get('Name')}' Status: {'UP' if config_info.get('Status') else 'DOWN'}")
+            logger.info(f"Connected Peers: {config_info.get('ConnectedPeers', 0)}/{config_info.get('TotalPeers', 0)}")
+        
+        # Show all available peers
+        if 'data' in data and 'configurationPeers' in data['data']:
+            peers = data['data']['configurationPeers']
+            logger.info(f"Total peers found: {len(peers)}")
+            
+            for i, peer in enumerate(peers):
+                peer_name = peer.get('name', f'peer-{i}')
+                handshake = peer.get('latest_handshake', 'Unknown')
+                status = peer.get('status', 'unknown')
+                logger.info(f"  - {peer_name}: handshake='{handshake}', status='{status}'")
+        
+        # Test monitoring logic
         status = self.analyze_connections(data)
         
         if status.get('interface'):
             peers = status.get('peers', {})
-            if isinstance(peers, dict):
+            if peers:
+                monitored_count = len(peers)
                 connected_count = sum(1 for connected in peers.values() if connected)
-                total_peers = len(peers)
-                logger.info(f"Interface is UP, Peers: {connected_count}/{total_peers} connected")
+                logger.info(f"Monitoring {monitored_count} peers: {connected_count} connected, {monitored_count - connected_count} disconnected")
+                
                 for peer_name, is_connected in peers.items():
                     status_str = "Connected" if is_connected else "Disconnected"
                     logger.info(f"  - {peer_name}: {status_str}")
             else:
-                logger.info("Interface is UP, but no peer data available")
+                logger.warning("No peers configured for monitoring")
+                logger.info("Available peer names:")
+                if 'data' in data and 'configurationPeers' in data['data']:
+                    for peer in data['data']['configurationPeers']:
+                        logger.info(f"  - '{peer.get('name', 'unnamed')}'")
+                logger.info("Configure MONITORED_PEERS in .env or set MONITOR_ALL_PEERS=true")
         else:
             logger.warning("Interface is DOWN")
         

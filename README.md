@@ -76,7 +76,7 @@ If you prefer to set up manually:
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/wireguard-monitor.git
+   git clone https://github.com/isriam/wireguard-monitor.git
    cd wireguard-monitor
    ```
 
@@ -130,6 +130,7 @@ Copy `.env.example` to `.env` and configure the following required variables:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `WG_API_KEY` | WireGuard Dashboard API key | `WuphoOM7MXGcTYjU0RCCXYvvt3uM-8AffhxaOnEI1LU` |
+| `MONITORED_PEERS` | Comma-separated list of peer names to monitor | `JW Work Phone,JW Home PC` |
 | `SMTP_USERNAME` | Email account username | `your_email@gmail.com` |
 | `SMTP_PASSWORD` | Email account password/app password | `your_app_password` |
 | `FROM_EMAIL` | Sender email address | `your_email@gmail.com` |
@@ -143,6 +144,7 @@ Copy `.env.example` to `.env` and configure the following required variables:
 | `SMTP_SERVER` | `smtp.gmail.com` | SMTP server hostname |
 | `SMTP_PORT` | `587` | SMTP server port |
 | `TO_EMAILS` | `admin@example.com` | Comma-separated list of recipients |
+| `MONITOR_ALL_PEERS` | `false` | Monitor all peers automatically (true/false) |
 | `CHECK_INTERVAL` | `300` | Time between checks (seconds) |
 | `CONNECTION_TIMEOUT` | `10` | API request timeout (seconds) |
 | `MAX_RETRIES` | `3` | Maximum API retry attempts |
