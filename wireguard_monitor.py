@@ -10,6 +10,7 @@ import json
 import time
 import logging
 import os
+import argparse
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -18,6 +19,93 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+def setup_logging(verbose=False, debug=False):
+    """Setup logging configuration based on verbosity level."""
+    if debug:
+        level = logging.DEBUG
+    elif verbose:
+        level = logging.INFO
+    else:
+        level = logging.WARNING
+    
+    # Create formatters
+    detailed_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+    )
+    simple_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+    # Choose formatter based on debug mode
+    formatter = detailed_formatter if debug else simple_formatter
+    
+    # Setup handlers
+    handlers = [logging.StreamHandler()]
+    
+    # Add file handler if not in debug mode (avoid cluttering during testing)
+    if not debug:
+        handlers.append(logging.FileHandler('wireguard_monitor.log'))
+    
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=handlers
+    )
+    
+    # Apply detailed formatter to all handlers in debug mode
+    if debug:
+        for handler in logging.getLogger().handlers:
+            handler.setFormatter(detailed_formatter)
+    
+    return logging.getLogger(__name__)
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Monitor WireGuard connections and send email notifications',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 wireguard_monitor.py                    # Normal operation
+  python3 wireguard_monitor.py -v                 # Verbose output
+  python3 wireguard_monitor.py -d                 # Debug mode with detailed logging
+  python3 wireguard_monitor.py --test-email       # Test email configuration
+  python3 wireguard_monitor.py --check-once       # Single status check (no loop)
+        """
+    )
+    
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Enable verbose logging (INFO level)'
+    )
+    
+    parser.add_argument(
+        '-d', '--debug',
+        action='store_true',
+        help='Enable debug logging (DEBUG level) with detailed output'
+    )
+    
+    parser.add_argument(
+        '--test-email',
+        action='store_true',
+        help='Send a test email and exit'
+    )
+    
+    parser.add_argument(
+        '--check-once',
+        action='store_true',
+        help='Perform a single status check and exit (useful for testing)'
+    )
+    
+    parser.add_argument(
+        '--config-test',
+        action='store_true',
+        help='Test configuration and API connectivity without sending emails'
+    )
+    
+    return parser.parse_args()
 
 def load_config() -> Dict:
     """Load configuration from environment variables."""
@@ -51,15 +139,7 @@ def load_config() -> Dict:
 # Load configuration
 CONFIG = load_config()
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('wireguard_monitor.log'),
-        logging.StreamHandler()
-    ]
-)
+# Initialize logger (will be reconfigured in main())
 logger = logging.getLogger(__name__)
 
 class WireGuardMonitor:
@@ -77,8 +157,14 @@ class WireGuardMonitor:
         url = f"{self.config['api_url']}/getWireguardConfigurationInfo"
         params = {'configurationName': self.config['config_name']}
         
+        logger.debug(f"Making API request to: {url}")
+        logger.debug(f"Request params: {params}")
+        logger.debug(f"Request headers: {dict(headers)}")  # Hide sensitive API key in non-debug mode
+        
         for attempt in range(self.config['max_retries']):
             try:
+                logger.debug(f"API request attempt {attempt + 1}/{self.config['max_retries']}")
+                
                 response = requests.get(
                     url,
                     headers=headers,
@@ -86,30 +172,44 @@ class WireGuardMonitor:
                     timeout=self.config['connection_timeout']
                 )
                 
+                logger.debug(f"API response status: {response.status_code}")
+                logger.debug(f"API response headers: {dict(response.headers)}")
+                
                 if response.status_code == 200:
-                    return response.json()
+                    data = response.json()
+                    logger.debug(f"API response data: {json.dumps(data, indent=2)}")
+                    return data
                 else:
                     logger.warning(f"API returned status {response.status_code}: {response.text}")
                     
             except requests.exceptions.RequestException as e:
                 logger.warning(f"API request attempt {attempt + 1} failed: {e}")
+                logger.debug(f"Exception details: {type(e).__name__}: {str(e)}")
                 
                 if attempt < self.config['max_retries'] - 1:
+                    logger.debug(f"Waiting {self.config['retry_delay']} seconds before retry...")
                     time.sleep(self.config['retry_delay'])
         
+        logger.error("All API request attempts failed")
         return None
     
     def analyze_connections(self, data: Dict) -> Dict[str, bool]:
         """Analyze connection data and return status for each peer."""
+        logger.debug("Starting connection analysis")
+        
         if not data or 'data' not in data:
             logger.error("Invalid API response format")
+            logger.debug(f"Received data: {data}")
             return {}
         
         config_data = data['data']
+        logger.debug(f"Configuration data: {json.dumps(config_data, indent=2)}")
+        
         peer_status = {}
         
         # Check if the interface is up
         interface_status = config_data.get('status', 'down').lower() == 'up'
+        logger.debug(f"Interface status: {interface_status} (raw: {config_data.get('status')})")
         
         if not interface_status:
             logger.warning(f"WireGuard interface {self.config['config_name']} is down")
@@ -117,15 +217,20 @@ class WireGuardMonitor:
         
         # Check peers
         peers = config_data.get('peers', [])
+        logger.debug(f"Found {len(peers)} peers")
+        
         if not peers:
             logger.warning("No peers found in configuration")
             return {'interface': True, 'peers': False}
         
         current_time = datetime.now()
+        logger.debug(f"Current time: {current_time}")
         
-        for peer in peers:
-            peer_name = peer.get('name', peer.get('id', 'unknown'))
+        for i, peer in enumerate(peers):
+            peer_name = peer.get('name', peer.get('id', f'peer-{i}'))
             latest_handshake = peer.get('latest_handshake')
+            
+            logger.debug(f"Analyzing peer '{peer_name}': handshake={latest_handshake}")
             
             if latest_handshake and latest_handshake != 'N/A':
                 try:
@@ -133,25 +238,37 @@ class WireGuardMonitor:
                     handshake_time = datetime.fromisoformat(latest_handshake.replace('Z', '+00:00'))
                     time_since_handshake = (current_time - handshake_time).total_seconds()
                     
+                    logger.debug(f"Peer '{peer_name}': handshake time={handshake_time}, seconds ago={time_since_handshake:.1f}")
+                    
                     # Consider connection alive if handshake within configured timeout
                     is_connected = time_since_handshake < self.config['handshake_timeout']
                     peer_status[peer_name] = is_connected
                     
                     if not is_connected:
                         logger.warning(f"Peer {peer_name} last handshake: {time_since_handshake:.0f}s ago")
+                    else:
+                        logger.debug(f"Peer {peer_name} is connected (handshake {time_since_handshake:.0f}s ago)")
                         
                 except (ValueError, TypeError) as e:
                     logger.error(f"Failed to parse handshake time for peer {peer_name}: {e}")
+                    logger.debug(f"Raw handshake value: '{latest_handshake}'")
                     peer_status[peer_name] = False
             else:
                 logger.warning(f"Peer {peer_name} has no handshake data")
                 peer_status[peer_name] = False
         
-        return {'interface': True, 'peers': peer_status}
+        result = {'interface': True, 'peers': peer_status}
+        logger.debug(f"Connection analysis result: {result}")
+        return result
     
     def send_email_notification(self, subject: str, body: str):
         """Send email notification."""
         try:
+            logger.debug(f"Preparing email: {subject}")
+            logger.debug(f"SMTP server: {self.config['smtp_server']}:{self.config['smtp_port']}")
+            logger.debug(f"From: {self.config['from_email']}")
+            logger.debug(f"To: {self.config['to_emails']}")
+            
             msg = MIMEMultipart()
             msg['From'] = self.config['from_email']
             msg['To'] = ', '.join(self.config['to_emails'])
@@ -159,10 +276,16 @@ class WireGuardMonitor:
             
             msg.attach(MIMEText(body, 'plain'))
             
+            logger.debug("Connecting to SMTP server...")
             server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'])
+            
+            logger.debug("Starting TLS...")
             server.starttls()
+            
+            logger.debug("Authenticating...")
             server.login(self.config['smtp_username'], self.config['smtp_password'])
             
+            logger.debug("Sending email...")
             for to_email in self.config['to_emails']:
                 server.sendmail(self.config['from_email'], to_email, msg.as_string())
             
@@ -171,6 +294,54 @@ class WireGuardMonitor:
             
         except Exception as e:
             logger.error(f"Failed to send email notification: {e}")
+            logger.debug(f"Email error details: {type(e).__name__}: {str(e)}")
+    
+    def test_email(self):
+        """Send a test email to verify configuration."""
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        subject = "WireGuard Monitor Test Email"
+        body = f"""
+This is a test email from WireGuard Monitor.
+
+Configuration Test Results:
+- Timestamp: {timestamp}
+- Monitoring config: {self.config['config_name']}
+- API URL: {self.config['api_url']}
+- Check interval: {self.config['check_interval']} seconds
+
+If you receive this email, your email configuration is working correctly!
+"""
+        
+        logger.info("Sending test email...")
+        self.send_email_notification(subject, body)
+    
+    def test_api_connectivity(self):
+        """Test API connectivity and display results."""
+        logger.info("Testing API connectivity...")
+        
+        data = self.get_wireguard_status()
+        if data is None:
+            logger.error("API connectivity test failed")
+            return False
+        
+        logger.info("API connectivity test successful")
+        status = self.analyze_connections(data)
+        
+        if status.get('interface'):
+            peers = status.get('peers', {})
+            if isinstance(peers, dict):
+                connected_count = sum(1 for connected in peers.values() if connected)
+                total_peers = len(peers)
+                logger.info(f"Interface is UP, Peers: {connected_count}/{total_peers} connected")
+                for peer_name, is_connected in peers.items():
+                    status_str = "Connected" if is_connected else "Disconnected"
+                    logger.info(f"  - {peer_name}: {status_str}")
+            else:
+                logger.info("Interface is UP, but no peer data available")
+        else:
+            logger.warning("Interface is DOWN")
+        
+        return True
     
     def check_status_changes(self, current_status: Dict):
         """Check for status changes and send notifications."""
@@ -241,13 +412,20 @@ Current peer status:
         
         self.last_status = current_status.copy()
     
-    def run_monitor(self):
+    def run_monitor(self, check_once=False):
         """Main monitoring loop."""
         logger.info("Starting WireGuard connection monitor...")
         logger.info(f"Monitoring configuration: {self.config['config_name']}")
         logger.info(f"Check interval: {self.config['check_interval']} seconds")
         
+        if check_once:
+            logger.info("Single check mode enabled")
+        
+        iteration = 0
         while True:
+            iteration += 1
+            logger.debug(f"Starting monitoring iteration {iteration}")
+            
             try:
                 # Get current status
                 api_data = self.get_wireguard_status()
@@ -283,20 +461,30 @@ Monitoring will continue automatically.
                     # Log current status
                     if current_status.get('interface'):
                         peers = current_status.get('peers', {})
-                        connected_count = sum(1 for connected in peers.values() if connected)
-                        total_peers = len(peers)
-                        logger.info(f"Status check: Interface UP, Peers: {connected_count}/{total_peers} connected")
+                        if isinstance(peers, dict):
+                            connected_count = sum(1 for connected in peers.values() if connected)
+                            total_peers = len(peers)
+                            logger.info(f"Status check: Interface UP, Peers: {connected_count}/{total_peers} connected")
+                        else:
+                            logger.info("Status check: Interface UP, no peer data")
                     else:
                         logger.warning("Status check: Interface DOWN")
+                
+                if check_once:
+                    logger.info("Single check completed, exiting")
+                    break
                 
             except KeyboardInterrupt:
                 logger.info("Monitor stopped by user")
                 break
             except Exception as e:
                 logger.error(f"Unexpected error in monitoring loop: {e}")
+                logger.debug(f"Exception details: {type(e).__name__}: {str(e)}", exc_info=True)
             
-            # Wait for next check
-            time.sleep(self.config['check_interval'])
+            if not check_once:
+                # Wait for next check
+                logger.debug(f"Waiting {self.config['check_interval']} seconds for next check...")
+                time.sleep(self.config['check_interval'])
 
 def validate_config():
     """Validate required configuration settings."""
@@ -323,6 +511,13 @@ def validate_config():
 
 def main():
     """Main entry point."""
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Setup logging based on arguments
+    global logger
+    logger = setup_logging(verbose=args.verbose, debug=args.debug)
+    
     print("WireGuard Connection Monitor")
     print("=" * 40)
     
@@ -341,8 +536,39 @@ def main():
     logger.info(f"API URL: {CONFIG['api_url']}")
     logger.info(f"Email notifications will be sent to: {', '.join(CONFIG['to_emails'])}")
     
+    if args.debug:
+        logger.info("Debug mode enabled - detailed logging active")
+    elif args.verbose:
+        logger.info("Verbose mode enabled")
+    
     monitor = WireGuardMonitor(CONFIG)
-    monitor.run_monitor()
+    
+    try:
+        if args.test_email:
+            logger.info("Testing email configuration...")
+            monitor.test_email()
+            
+        elif args.config_test:
+            logger.info("Testing configuration and API connectivity...")
+            if monitor.test_api_connectivity():
+                logger.info("Configuration test completed successfully")
+            else:
+                logger.error("Configuration test failed")
+                
+        elif args.check_once:
+            logger.info("Performing single status check...")
+            monitor.run_monitor(check_once=True)
+            
+        else:
+            # Normal monitoring mode
+            monitor.run_monitor()
+            
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        if args.debug:
+            logger.exception("Full traceback:")
 
 if __name__ == "__main__":
     main()
