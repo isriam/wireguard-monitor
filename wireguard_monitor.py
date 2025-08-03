@@ -360,10 +360,15 @@ class WireGuardMonitor:
             
             # Improved status field logic - prioritize handshake timing for mobile devices
             if peer_status_field in ['running', 'connected', 'active']:
-                # If status shows running, peer is definitely connected
-                if not is_connected:
-                    logger.debug(f"Peer '{peer_name}': Status field '{peer_status_field}' overrides handshake analysis")
-                is_connected = True
+                # Edge case: status running but stale handshake
+                if latest_handshake and latest_handshake != 'No Handshake' and time_since_handshake > self.config['handshake_timeout']:
+                    logger.warning(f"Peer '{peer_name}': Status 'running' but stale handshake ({time_since_handshake}s) - trusting handshake")
+                    is_connected = False
+                else:
+                    # If status shows running, peer is definitely connected
+                    if not is_connected:
+                        logger.debug(f"Peer '{peer_name}': Status field '{peer_status_field}' overrides handshake analysis")
+                    is_connected = True
             elif peer_status_field in ['stopped', 'disconnected', 'inactive']:
                 # Only trust 'stopped' status if handshake is actually stale
                 if latest_handshake and latest_handshake != 'No Handshake':
