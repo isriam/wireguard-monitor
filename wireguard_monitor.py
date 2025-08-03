@@ -391,7 +391,7 @@ class WireGuardMonitor:
             if not is_connected:
                 logger.warning(f"Monitored peer '{peer_name}' is disconnected (handshake: {latest_handshake}, status: {peer_status_field})")
             else:
-                logger.info(f"Monitored peer '{peer_name}' is connected")
+                logger.info(f"Monitored peer '{peer_name}' is connected (handshake: {latest_handshake}, status: {peer_status_field})")
         
         result = {'interface': True, 'peers': peer_status}
         logger.debug(f"Connection analysis result: {result}")
@@ -524,6 +524,7 @@ Current peer status:
         logger.info("Starting WireGuard connection monitor...")
         logger.info(f"Monitoring configuration: {self.config['config_name']}")
         logger.info(f"Check interval: {self.config['check_interval']} seconds")
+        logger.info(f"Handshake timeout: {self.config['handshake_timeout']} seconds")
         
         if check_once:
             logger.info("Single check mode enabled")
@@ -668,7 +669,8 @@ def main():
             email_notifier.send_test_email(
                 CONFIG['config_name'],
                 CONFIG['api_url'],
-                CONFIG['check_interval']
+                CONFIG['check_interval'],
+                CONFIG['handshake_timeout']
             )
             
         elif args.config_test:
